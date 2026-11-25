@@ -10,9 +10,16 @@ export const DETACH_KEY = (process.env.PI_TERM_OVERLAY_DETACH_KEY || "ctrl+\\") 
 export const OVERLAY_MARGIN_Y = 1;
 export const OVERLAY_MARGIN_X = 2;
 
+/**
+ * Called with each translated key before it reaches the PTY. Returning a
+ * promise holds that key (and any keys typed meanwhile) until it settles.
+ */
+export type InputGate = (key: string) => Promise<unknown> | undefined;
+
 export class TermOverlay implements Component, Focusable {
 	focused = false;
 	private unsubscribe: (() => void) | undefined;
+	private held: string[] | undefined;
 
 	constructor(
 		private readonly tui: TUI,
@@ -20,6 +27,7 @@ export class TermOverlay implements Component, Focusable {
 		private readonly session: TermSession,
 		private readonly title: string,
 		private readonly onDetach: () => void,
+		private readonly gate?: InputGate,
 	) {
 		this.unsubscribe = session.onRender(() => this.tui.requestRender());
 	}
@@ -52,12 +60,27 @@ export class TermOverlay implements Component, Focusable {
 			this.onDetach();
 			return;
 		}
-		this.session.write(
-			translateInput(data, {
-				applicationCursorKeys: this.session.applicationCursorKeys,
-				bracketedPaste: this.session.bracketedPaste,
-			}),
-		);
+		const key = translateInput(data, {
+			applicationCursorKeys: this.session.applicationCursorKeys,
+			bracketedPaste: this.session.bracketedPaste,
+		});
+		if (!key) return;
+		if (this.held) {
+			this.held.push(key);
+			return;
+		}
+		const wait = this.gate?.(key);
+		if (!wait) {
+			this.session.write(key);
+			return;
+		}
+		this.held = [key];
+		const release = () => {
+			const keys = this.held ?? [];
+			this.held = undefined;
+			if (!this.session.exited) for (const k of keys) this.session.write(k);
+		};
+		wait.then(release, release);
 	}
 
 	invalidate(): void {}

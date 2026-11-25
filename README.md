@@ -42,8 +42,9 @@ Linux and macOS (anything `zigpty` ships native PTY bindings for). TUI mode only
    if asked (`--watch` reloads the diff).
 4. When the agent settles, the Hunk overlay reopens on the first reply.
 
-If Hunk is quit by accident, the last comment snapshot (polled every 3 s while the overlay is
-open) is still sent, and the agent answers in chat.
+If Hunk is quit by accident (`q` or `Ctrl+C`), the overlay holds that key until it has refreshed
+the comment snapshot, so notes saved right before quitting are still sent. The agent answers in
+chat because the Hunk session is gone.
 
 ## Development
 

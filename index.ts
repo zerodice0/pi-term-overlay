@@ -29,6 +29,10 @@ interface Managed {
 	hunkSessionId?: string;
 	sentNotes: Map<string, string>;
 	snapshot?: HunkComment[];
+	/** When the request behind `snapshot` started. */
+	snapshotAt?: number;
+	/** Last key sent to hunk that may have changed its notes. */
+	inputAt?: number;
 	awaitingSince?: number;
 	// nvim
 	nvimSocket?: string;
@@ -37,6 +41,10 @@ interface Managed {
 const STATUS_KEY = "term-overlay";
 const HUNK_DEFAULT_ARGS = ["diff"];
 const HUNK_FLAGS = ["--watch", "--agent-notes"];
+/** Hunk's default quit keys (`hunk.app.quit`): q and Ctrl+C. */
+const HUNK_QUIT_KEYS = new Set(["q", "\x03"]);
+/** Longest a quit key is held while the comment snapshot refreshes. */
+const QUIT_GATE_MS = 2000;
 
 export default function (pi: ExtensionAPI) {
 	const managed = new Map<Kind, Managed>();
@@ -65,11 +73,34 @@ export default function (pi: ExtensionAPI) {
 		lastCtx?.ui.notify(`Hunk 코멘트 ${pending.length}개를 에이전트에게 보냈습니다.`, "info");
 	};
 
-	const collectHunkFeedback = async (m: Managed) => {
-		if (!m.hunkSessionId || m.session.exited) return;
+	const refreshSnapshot = async (m: Managed): Promise<HunkComment[] | undefined> => {
+		if (!m.hunkSessionId || m.session.exited) return undefined;
+		const startedAt = Date.now();
 		const comments = await listComments(pi, m.session.cwd, m.hunkSessionId);
+		if (comments && startedAt >= (m.snapshotAt ?? 0)) {
+			m.snapshot = comments;
+			m.snapshotAt = startedAt;
+		}
+		return comments;
+	};
+
+	/**
+	 * Hold Hunk's quit keys until the comment snapshot is current, so notes saved
+	 * just before quitting still reach the agent after hunk exits.
+	 */
+	const hunkQuitGate = (m: Managed) => (key: string) => {
+		if (!HUNK_QUIT_KEYS.has(key)) {
+			m.inputAt = Date.now();
+			return undefined;
+		}
+		if (!m.hunkSessionId || m.session.exited || m.inputAt === undefined) return undefined;
+		if ((m.snapshotAt ?? 0) > m.inputAt) return undefined;
+		return Promise.race([refreshSnapshot(m), new Promise((r) => setTimeout(r, QUIT_GATE_MS))]);
+	};
+
+	const collectHunkFeedback = async (m: Managed) => {
+		const comments = await refreshSnapshot(m);
 		if (!comments) return;
-		m.snapshot = comments;
 		const pending = pendingUserComments(m, comments);
 		if (pending.length) sendFeedback(m, pending, comments, true);
 	};
@@ -78,11 +109,7 @@ export default function (pi: ExtensionAPI) {
 		stopPolling();
 		if (m.kind !== "hunk") return;
 		// Keep a snapshot so comments survive if hunk is quit by accident.
-		pollTimer = setInterval(async () => {
-			if (!m.hunkSessionId || m.session.exited) return;
-			const comments = await listComments(pi, m.session.cwd, m.hunkSessionId);
-			if (comments) m.snapshot = comments;
-		}, 3000);
+		pollTimer = setInterval(() => void refreshSnapshot(m), 3000);
 	};
 	const stopPolling = () => {
 		if (pollTimer) clearInterval(pollTimer);
@@ -151,7 +178,8 @@ export default function (pi: ExtensionAPI) {
 		const promise = ctx.ui.custom<void>(
 			(tui, theme, _kb, done) => {
 				closeFn = () => done(undefined);
-				overlay = new TermOverlay(tui, theme, m.session, title, () => done(undefined));
+				const gate = m.kind === "hunk" ? hunkQuitGate(m) : undefined;
+				overlay = new TermOverlay(tui, theme, m.session, title, () => done(undefined), gate);
 				return overlay;
 			},
 			{
@@ -243,8 +271,7 @@ export default function (pi: ExtensionAPI) {
 		m.awaitingSince = undefined;
 		if (event.aborted || active || ctx.mode !== "tui") return;
 		void (async () => {
-			const comments = (await listComments(pi, m.session.cwd, m.hunkSessionId!)) ?? [];
-			m.snapshot = comments;
+			const comments = (await refreshSnapshot(m)) ?? [];
 			const reply = comments.find((c) => c.source !== "user" && c.createdAt && Date.parse(c.createdAt) >= since);
 			if (!reply) ctx.ui.notify("에이전트가 Hunk에 답글을 남기지 않았습니다. 채팅의 답변을 확인하세요.", "info");
 			await show(m, ctx, () => {
