@@ -1,0 +1,55 @@
+{
+  "name": "pi-term-overlay",
+  "version": "0.1.0",
+  "description": "Run hunk, lazygit and nvim in persistent pi overlays, with a Hunk review-comment feedback loop to the agent.",
+  "type": "module",
+  "license": "MIT",
+  "author": "zerodice0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zerodice0/pi-term-overlay.git"
+  },
+  "homepage": "https://github.com/zerodice0/pi-term-overlay",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "hunk",
+    "lazygit",
+    "nvim",
+    "terminal",
+    "overlay"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "*.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs"
+  },
+  "dependencies": {
+    "@xterm/headless": "^5.5.0",
+    "zigpty": "^0.1.6"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  }
+}
