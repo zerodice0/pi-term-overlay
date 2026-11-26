@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -36,7 +37,14 @@ function parentPid(pid: number): number | undefined {
 		const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
 		return Number(rest[1]);
 	} catch {
-		return undefined;
+		// No procfs (macOS): ask ps.
+		try {
+			const out = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
+			const ppid = Number(out.trim());
+			return Number.isInteger(ppid) && ppid > 0 ? ppid : undefined;
+		} catch {
+			return undefined;
+		}
 	}
 }
 
