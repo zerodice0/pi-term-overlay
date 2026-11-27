@@ -38,6 +38,8 @@ export class TermSession {
 	private readonly renderListeners = new Set<() => void>();
 	private readonly exitListeners = new Set<(code: number) => void>();
 	private disposed = false;
+	/** Mouse report encoding the app asked for (DECSET 1006 / 1016). */
+	private mouseEncoding: "x10" | "sgr" | "sgr-pixels" = "x10";
 
 	constructor(opts: TermSessionOptions) {
 		this.name = opts.name;
@@ -78,6 +80,17 @@ export class TermSession {
 			return true;
 		});
 
+		// Track the mouse encoding; returning false lets xterm handle the mode too.
+		const trackMouseEncoding = (set: boolean) => (params: (number | number[])[]) => {
+			for (const p of params) {
+				if (p === 1006) this.mouseEncoding = set ? "sgr" : "x10";
+				else if (p === 1016) this.mouseEncoding = set ? "sgr-pixels" : "x10";
+			}
+			return false;
+		};
+		this.term.parser.registerCsiHandler({ prefix: "?", final: "h" }, trackMouseEncoding(true));
+		this.term.parser.registerCsiHandler({ prefix: "?", final: "l" }, trackMouseEncoding(false));
+
 		this.pty.onData((data) => {
 			if (this.disposed) return;
 			this.term.write(typeof data === "string" ? data : data.toString("utf8"), () => {
@@ -103,6 +116,31 @@ export class TermSession {
 	}
 	get bracketedPaste(): boolean {
 		return this.term.modes.bracketedPasteMode;
+	}
+
+	/**
+	 * Bytes for one mouse-wheel step at the zero-based cell (col, row), or
+	 * undefined when the app can take no wheel input. Apps with mouse tracking
+	 * get a wheel report; full-screen apps without it get arrow keys, as with
+	 * xterm's alternate scroll mode.
+	 */
+	wheelSequence(col: number, row: number, direction: -1 | 1, mods: { shift: boolean; alt: boolean; ctrl: boolean }): string | undefined {
+		const mode = this.term.modes.mouseTrackingMode;
+		if (mode === "vt200" || mode === "drag" || mode === "any") {
+			const x = Math.min(Math.max(0, col), this.term.cols - 1);
+			const y = Math.min(Math.max(0, row), this.term.rows - 1);
+			const button = (direction < 0 ? 64 : 65) | (mods.shift ? 4 : 0) | (mods.alt ? 8 : 0) | (mods.ctrl ? 16 : 0);
+			if (this.mouseEncoding === "sgr") return `\x1b[<${button};${x + 1};${y + 1}M`;
+			if (this.mouseEncoding === "sgr-pixels") return `\x1b[<${button};${x * 8 + 1};${y * 16 + 1}M`;
+			// Legacy X10 bytes above 127 would be UTF-8 encoded by the string PTY write; clamp instead.
+			const byte = (n: number) => String.fromCharCode(Math.min(127, 32 + n));
+			return `\x1b[M${byte(button)}${byte(x + 1)}${byte(y + 1)}`;
+		}
+		if (this.term.buffer.active.type === "alternate") {
+			const arrow = `\x1b${this.applicationCursorKeys ? "O" : "["}${direction < 0 ? "A" : "B"}`;
+			return arrow.repeat(3);
+		}
+		return undefined;
 	}
 
 	onRender(fn: () => void): () => void {

@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, Focusable, KeyId, TUI } from "@earendil-works/pi-tui";
+import type { Component, Focusable, KeyId, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { translateInput } from "./input.ts";
 import type { TermSession } from "./term-session.ts";
@@ -64,12 +64,31 @@ export class TermOverlay implements Component, Focusable {
 			applicationCursorKeys: this.session.applicationCursorKeys,
 			bracketedPaste: this.session.bracketedPaste,
 		});
-		if (!key) return;
+		if (key) this.send(key, true);
+	}
+
+	/**
+	 * Fullscreen pi routes the mouse here. Wheel events go to the PTY and are
+	 * always consumed so pi's transcript behind the overlay does not scroll.
+	 * Other events fall through to pi's text selection.
+	 */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		if (event.type !== "wheel") return undefined;
+		const direction = Math.sign(event.wheelDelta ?? 0);
+		if (direction !== 0 && !this.session.exited) {
+			// One report per wheel notch, as a real terminal sends; pi's acceleration stays out.
+			const seq = this.session.wheelSequence(event.x - 1, event.y - 1, direction as -1 | 1, event);
+			if (seq) this.send(seq, false);
+		}
+		return { handled: true, render: false };
+	}
+
+	private send(key: string, gated: boolean): void {
 		if (this.held) {
 			this.held.push(key);
 			return;
 		}
-		const wait = this.gate?.(key);
+		const wait = gated ? this.gate?.(key) : undefined;
 		if (!wait) {
 			this.session.write(key);
 			return;
