@@ -1,5 +1,6 @@
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export interface HunkComment {
@@ -84,9 +85,91 @@ export async function navigateToComment(pi: ExtensionAPI, cwd: string, sessionId
 	await pi.exec("hunk", ["session", "navigate", sessionId, "--file", c.filePath, ...target], { cwd, timeout: 10_000 });
 }
 
-export async function reloadHunk(pi: ExtensionAPI, cwd: string, sessionId: string, args: string[]): Promise<boolean> {
+/** Reload a live session with new command args. Returns an error message on failure. */
+export async function reloadHunk(pi: ExtensionAPI, cwd: string, sessionId: string, args: string[]): Promise<string | undefined> {
 	const r = await pi.exec("hunk", ["session", "reload", sessionId, "--", ...args], { cwd, timeout: 15_000 });
-	return r.code === 0;
+	return r.code === 0 ? undefined : (r.stderr || r.stdout).trim() || `exit ${r.code}`;
+}
+
+/**
+ * Hunk command args with `extra` flags added. Flags go before a `--` path
+ * separator so they are not read as paths; flags already present are skipped.
+ * Empty args, or args that start with an option, review the working tree.
+ */
+export function hunkArgs(args: string[], extra: string[][] = []): string[] {
+	const base = !args.length || args[0].startsWith("-") ? ["diff", ...args] : [...args];
+	const sep = base.indexOf("--");
+	const head = sep < 0 ? base : base.slice(0, sep);
+	const tail = sep < 0 ? [] : base.slice(sep);
+	for (const flag of extra) if (!head.includes(flag[0])) head.push(...flag);
+	return [...head, ...tail];
+}
+
+/** An agent note on one diff line, from the `hunk_open` tool. */
+export interface HunkNote {
+	file: string;
+	line?: number;
+	oldLine?: number;
+	summary: string;
+	rationale?: string;
+}
+
+const NOTE_AUTHOR = "pi";
+
+/** Rewrite note paths to the repo-relative form Hunk shows. */
+export async function normalizeNotePaths(pi: ExtensionAPI, cwd: string, notes: HunkNote[]): Promise<HunkNote[]> {
+	const r = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 5000 });
+	const root = r.code === 0 && r.stdout.trim() ? r.stdout.trim() : cwd;
+	return notes.map((n) => {
+		const raw = n.file.replace(/^@/, "");
+		let abs = resolve(cwd, raw);
+		if (!isAbsolute(raw) && !existsSync(abs) && existsSync(resolve(root, raw))) abs = resolve(root, raw);
+		const rel = relative(root, abs);
+		return { ...n, file: rel && !rel.startsWith("..") ? rel : raw };
+	});
+}
+
+/** Agent-context sidecar JSON for `hunk --agent-context`. */
+export function buildAgentContext(notes: HunkNote[], idPrefix: string): { json: string; ids: string[] } {
+	const files = new Map<string, object[]>();
+	const ids: string[] = [];
+	notes.forEach((n, i) => {
+		const id = `${idPrefix}-${i + 1}`;
+		ids.push(id);
+		const annotation = {
+			id,
+			...(n.line !== undefined ? { newRange: [n.line, n.line] } : { oldRange: [n.oldLine, n.oldLine] }),
+			summary: n.summary,
+			...(n.rationale ? { rationale: n.rationale } : {}),
+			author: NOTE_AUTHOR,
+			source: "agent",
+		};
+		const list = files.get(n.file) ?? [];
+		list.push(annotation);
+		files.set(n.file, list);
+	});
+	const json = JSON.stringify({ version: 1, files: [...files].map(([path, annotations]) => ({ path, annotations })) });
+	return { json, ids };
+}
+
+/** Add notes to a live session in one batch and focus the first. Returns an error message on failure. */
+export function applyNotes(cwd: string, sessionId: string, notes: HunkNote[]): Promise<string | undefined> {
+	const comments = notes.map((n) => ({
+		filePath: n.file,
+		...(n.line !== undefined ? { newLine: n.line } : { oldLine: n.oldLine }),
+		summary: n.summary,
+		...(n.rationale ? { rationale: n.rationale } : {}),
+		author: NOTE_AUTHOR,
+	}));
+	return new Promise((done) => {
+		const child = execFile(
+			"hunk",
+			["session", "comment", "apply", sessionId, "--stdin", "--focus"],
+			{ cwd, timeout: 15_000 },
+			(err, stdout, stderr) => done(err ? (stderr || stdout || err.message).trim() : undefined),
+		);
+		child.stdin?.end(JSON.stringify({ comments }));
+	});
 }
 
 function location(c: HunkComment): string {

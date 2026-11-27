@@ -14,11 +14,12 @@ const candidates = [
 const modules = candidates.find((c) => existsSync(join(c, "@earendil-works", "pi-coding-agent")));
 if (!modules) throw new Error("Could not locate pi's node_modules");
 
-const link = "node_modules/@earendil-works";
-if (existsSync(link)) throw new Error(`${link} already exists; remove it first`);
-symlinkSync(join(modules, "@earendil-works"), link);
+// pi supplies these at runtime (typebox through its loader alias), so link them only for the type check.
+const links = ["@earendil-works", "typebox"].map((name) => [join(modules, name), join("node_modules", name)]);
+for (const [, link] of links) if (existsSync(link)) throw new Error(`${link} already exists; remove it first`);
+for (const [target, link] of links) symlinkSync(target, link);
 try {
 	execFileSync("npx", ["-y", "-p", "typescript@5", "tsc", "-p", ".", "--typeRoots", join(modules, "@types")], { stdio: "inherit" });
 } finally {
-	rmSync(link);
+	for (const [, link] of links) rmSync(link);
 }
